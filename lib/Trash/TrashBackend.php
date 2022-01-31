@@ -21,6 +21,7 @@
 
 namespace OCA\GroupFolders\Trash;
 
+use OC\Files\Filesystem;
 use OC\Files\Storage\Wrapper\Jail;
 use OCA\Files_Trashbin\Expiration;
 use OCA\Files_Trashbin\Trash\ITrashBackend;
@@ -130,101 +131,234 @@ class TrashBackend implements ITrashBackend {
 			throw new NotPermittedException();
 		}
 
-		$trashStorage = $node->getStorage();
-		/** @var Folder $targetFolder */
-		$targetFolder = $this->mountProvider->getFolder((int)$folderId);
-		$originalLocation = $item->getOriginalLocation();
-		$parent = dirname($originalLocation);
-		if ($parent === '.') {
-			$parent = '';
-		}
-		if ($parent !== '' && !$targetFolder->nodeExists($parent)) {
-			$originalLocation = basename($originalLocation);
-		}
+	    $trashStorage = $node->getStorage();
+        /** @var Folder $targetFolder */
+        $targetFolder = $this->mountProvider->getFolder((int)$folderId);
 
-		if ($targetFolder->nodeExists($originalLocation)) {
-			$info = pathinfo($originalLocation);
-			$i = 1;
+        $originalLocation = $this->getRestoredItemOriginalLocation($item->getOriginalLocation(), $targetFolder);
 
-			$gen = function ($info, int $i): string {
-				$target = $info['dirname'];
-				if ($target === '.') {
-					$target = '';
-				}
+//		if ($originalLocation && $targetFolder->nodeExists($originalLocation)) {
+//			$info = pathinfo($originalLocation);
+//			$i = 1;
+//
+//			$gen = function ($info, int $i): string {
+//				$target = $info['dirname'];
+//				if ($target === '.') {
+//					$target = '';
+//				}
+//
+//				$target .= $info['filename'];
+//				$target .= ' (' . $i . ')';
+//
+//				if (isset($info['extension'])) {
+//					$target .= $info['extension'];
+//				}
+//
+//				return $target;
+//			};
+//
+//			do {
+//				$originalLocation = $gen($info, $i);
+//				$i++;
+//			} while ($targetFolder->nodeExists($originalLocation));
+//		}
 
-				$target .= $info['filename'];
-				$target .= ' (' . $i . ')';
+        $targetLocation = Filesystem::normalizePath($targetFolder->getInternalPath() . '/' . $originalLocation);
 
-				if (isset($info['extension'])) {
-					$target .= $info['extension'];
-				}
+        $targetFolder->getStorage()->moveItemRecursively($trashStorage, $node->getInternalPath(), $targetLocation);
 
-				return $target;
-			};
+//		$targetFolder->getStorage()->moveFromStorage($trashStorage, $node->getInternalPath(), $targetLocation);
+//		$targetFolder->getStorage()->getCache()->moveFromCache($trashStorage->getCache(), $node->getInternalPath(), $targetLocation);
 
-			do {
-				$originalLocation = $gen($info, $i);
-				$i++;
-			} while ($targetFolder->nodeExists($originalLocation));
-		}
+        // @TODO Not always the case, only when root
+        $this->trashManager->removeItem((int)$folderId, $item->getName(), $item->getDeletedTime());
+    }
 
-		$targetLocation = $targetFolder->getInternalPath() . '/' . $originalLocation;
-		$targetFolder->getStorage()->moveFromStorage($trashStorage, $node->getInternalPath(), $targetLocation);
-		$targetFolder->getStorage()->getCache()->moveFromCache($trashStorage->getCache(), $node->getInternalPath(), $targetLocation);
-		$this->trashManager->removeItem((int)$folderId, $item->getName(), $item->getDeletedTime());
-	}
+    /**
+     * @return void
+     */
+    public function removeItem(ITrashItem $item) {
+        if (!($item instanceof GroupTrashItem)) {
+            throw new \LogicException('Trying to remove normal trash item in group folder trash backend');
+        }
+        $user = $item->getUser();
+        [, $folderId] = explode('/', $item->getTrashPath());
+        $node = $this->getNodeForTrashItem($user, $item);
+        if ($node === null) {
+            throw new NotFoundException();
+        }
+        if ($node->getStorage()->unlink($node->getInternalPath()) === false) {
+            throw new \Exception('Failed to remove item from trashbin');
+        }
+        if (!$this->userHasAccessToPath($item->getUser(), $folderId . '/' . $item->getOriginalLocation(), Constants::PERMISSION_DELETE)) {
+            throw new NotPermittedException();
+        }
 
-	/**
-	 * @return void
-	 */
-	public function removeItem(ITrashItem $item) {
-		if (!($item instanceof GroupTrashItem)) {
-			throw new \LogicException('Trying to remove normal trash item in group folder trash backend');
-		}
-		$user = $item->getUser();
-		[, $folderId] = explode('/', $item->getTrashPath());
-		$node = $this->getNodeForTrashItem($user, $item);
-		if ($node === null) {
-			throw new NotFoundException();
-		}
-		if ($node->getStorage()->unlink($node->getInternalPath()) === false) {
-			throw new \Exception('Failed to remove item from trashbin');
-		}
-		if (!$this->userHasAccessToPath($item->getUser(), $folderId . '/' . $item->getOriginalLocation(), Constants::PERMISSION_DELETE)) {
-			throw new NotPermittedException();
-		}
+        $node->getStorage()->getCache()->remove($node->getInternalPath());
+        if ($item->isRootItem()) {
+            $this->trashManager->removeItem((int)$folderId, $item->getName(), $item->getDeletedTime());
+        }
+    }
 
-		$node->getStorage()->getCache()->remove($node->getInternalPath());
-		if ($item->isRootItem()) {
-			$this->trashManager->removeItem((int)$folderId, $item->getName(), $item->getDeletedTime());
-		}
-	}
+    /**
+     * @param IStorage $storage
+     * @param string $internalPath
+     * @return bool
+     * @throws \Exception
+     */
+    public function moveToTrash(IStorage $storage, string $internalPath): bool {
+        if ( ! ($storage->instanceOfStorage(GroupFolderStorage::class) && $storage->isDeletable($internalPath))) {
+            return false;
+        }
 
-	public function moveToTrash(IStorage $storage, string $internalPath): bool {
-		if ($storage->instanceOfStorage(GroupFolderStorage::class) && $storage->isDeletable($internalPath)) {
-			/** @var GroupFolderStorage|Jail $storage */
-			$name = basename($internalPath);
-			$fileEntry = $storage->getCache()->get($internalPath);
-			$folderId = $storage->getFolderId();
-			$trashFolder = $this->getTrashFolder($folderId);
-			$trashStorage = $trashFolder->getStorage();
-			$time = time();
-			$trashName = $name . '.d' . $time;
-			[$unJailedStorage, $unJailedInternalPath] = $this->unwrapJails($storage, $internalPath);
-			$targetInternalPath = $trashFolder->getInternalPath() . '/' . $trashName;
-			if ($trashStorage->moveFromStorage($unJailedStorage, $unJailedInternalPath, $targetInternalPath)) {
-				$this->trashManager->addTrashItem($folderId, $name, $time, $internalPath, $fileEntry->getId());
-				if ($trashStorage->getCache()->getId($targetInternalPath) !== $fileEntry->getId()) {
-					$trashStorage->getCache()->moveFromCache($unJailedStorage->getCache(), $unJailedInternalPath, $targetInternalPath);
-				}
-			} else {
-				throw new \Exception("Failed to move groupfolder item to trash");
-			}
-			return true;
-		} else {
-			return false;
-		}
-	}
+        /** @var GroupFolderStorage|Jail $storage */
+        $fileEntry = $storage->getCache()->get($internalPath);
+        $folderId = $storage->getFolderId();
+        $trashFolder = $this->getTrashFolder($folderId);
+        $trashStorage = $trashFolder->getStorage();
+
+        $groupFolderTrashItem = $this->firstOrCreateTrashItem($folderId, $trashFolder);
+
+        if ( ! $groupFolderTrashItem) {
+            throw new \Exception("Failed to move groupfolder item to trash");
+        }
+
+        $trashParent = $groupFolderTrashItem['name'] . '.d' . $groupFolderTrashItem['deleted_time'];
+        $trashParentInternalPath = $trashFolder->getInternalPath() . '/' . $trashParent;
+        [$unJailedStorage, $unJailedInternalPath] = $this->unwrapJails($storage, $internalPath);
+        $targetInternalPath = $trashParentInternalPath . '/' . $internalPath;
+
+        $this->createTrashDirectoriesForMovedItem($trashStorage, $internalPath, $trashParentInternalPath);
+
+        [$moveSuccessful, $shouldStop] = $trashStorage->moveItemRecursively($unJailedStorage, $unJailedInternalPath, $targetInternalPath);
+
+        if ( ! $moveSuccessful || $shouldStop) {
+            throw new \Exception("Failed to move groupfolder item to trash");
+        }
+
+//        if ($trashStorage->getCache()->getId($targetInternalPath) !== $fileEntry->getId()) {
+//            $trashStorage->getCache()->moveFromCache($unJailedStorage->getCache(), $unJailedInternalPath, $targetInternalPath);
+//        }
+
+        return true;
+    }
+
+    private function getRestoredItemOriginalLocation($originalLocation, $targetFolder) {
+        $parent = dirname($originalLocation);
+
+        if ($parent === '.') {
+            return '';
+        }
+
+        $parentDirectories = explode('/', $parent);
+        unset($parentDirectories[0]);
+
+        if (count($parentDirectories) === 0) {
+            return basename($originalLocation);
+        }
+
+        $parent = implode('/', $parentDirectories);
+
+        if ($targetFolder->nodeExists($parent)) {
+            return Filesystem::normalizePath($parent . '/' . basename($originalLocation));
+        }
+
+        $targetStorage = $targetFolder->getStorage();
+        $targetCache = $targetStorage->getCache();
+        $currentPath = '';
+
+        foreach ($parentDirectories as $parentDirectory) {
+            $currentPath = $currentPath . '/' . $parentDirectory;
+
+            if ( ! $targetFolder->nodeExists($currentPath)) {
+                $currentPathGroupFolderPath = Filesystem::normalizePath($targetFolder->getPath() . '/' . $currentPath);
+
+                $targetCache->insert($currentPathGroupFolderPath, [
+                    'size' => 0,
+                    'mtime' => time(),
+                    'mimetype' => 'httpd/unix-directory',
+                    'permissions' => 31,
+                ]);
+
+                // Create file system 'directory'.
+                $targetStorage->mkdir($currentPathGroupFolderPath);
+            }
+        }
+
+        return Filesystem::normalizePath($currentPath . '/' . basename($originalLocation));
+    }
+
+    private function firstOrCreateTrashItem(int $folderId, $trashFolder): ?array {
+        $result = $this->trashManager->listTrashForFolders([$folderId]);
+
+        if (count($result) > 0) {
+            return $result[0];
+        }
+
+        $groupFolder = $this->folderManager->getFolder($folderId, $this->rootFolder->getMountPoint()->getNumericStorageId());
+
+        if ( ! $groupFolder) {
+            return null;
+        }
+
+        $time = time();
+
+        $id = $this->createTrashDirectory($groupFolder['mount_point'], $trashFolder, $time);
+
+        $this->trashManager->addTrashItem($folderId, $groupFolder['mount_point'], $time, $groupFolder['mount_point'], $id);
+
+        return $this->trashManager->getTrashItemByFileId($id);
+    }
+
+    private function createTrashDirectory(string $name, $trashFolder, int $time): int {
+        $trashName = $name . '.d' . $time;
+        $targetInternalPath = $trashFolder->getInternalPath() . '/' . $trashName;
+        $trashNormalizedPath = Filesystem::normalizePath($targetInternalPath);
+        $trashStorage = $trashFolder->getStorage();
+        $trashCache = $trashStorage->getCache();
+
+        $id = $trashCache->insert($trashNormalizedPath, [
+            'size' => 0,
+            'mtime' => $time,
+            'mimetype' => 'httpd/unix-directory',
+            'permissions' => 31,
+        ]);
+
+        // Create file system 'directory'.
+        $trashStorage->mkdir($trashNormalizedPath);
+
+        return $id;
+    }
+
+    private function createTrashDirectoriesForMovedItem($trashStorage, $internalPath, $trashParentInternalPath) {
+        $parentDirectories = explode('/', dirname($internalPath));
+
+        if (count($parentDirectories) === 0) {
+            return;
+        }
+
+        $trashCache = $trashStorage->getCache();
+        $currentParentPath = $trashParentInternalPath;
+
+        foreach ($parentDirectories as $parentDirectory) {
+            $currentParentPath = Filesystem::normalizePath("$currentParentPath/$parentDirectory");
+
+            // Parent directory exists, so we don't have to do anything.
+            if ($trashStorage->file_exists($currentParentPath)) {
+                continue;
+            }
+
+            $trashStorage->mkdir($currentParentPath);
+
+            // Store in 'filecache' DB table.
+            $trashCache->insert($currentParentPath, [
+                'size' => 0,
+                'mtime' => time(),
+                'mimetype' => 'httpd/unix-directory',
+                'permissions' => 31,
+            ]);
+        }
+    }
 
 	private function unwrapJails(IStorage $storage, string $internalPath): array {
 		$unJailedInternalPath = $internalPath;
