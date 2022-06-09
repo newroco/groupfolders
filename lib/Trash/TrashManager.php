@@ -44,6 +44,48 @@ class TrashManager {
 		return $query->executeQuery()->fetchAll();
 	}
 
+	public function groupTrashFolderIds(): array {
+		$query = $this->connection->getQueryBuilder();
+		$query->selectDistinct(['folder_id'])
+			->from('group_folders_trash');
+
+		return array_map(function($folder) {
+			return (int) $folder['folder_id'];
+		}, $query->executeQuery()->fetchAll());
+	}
+
+	public function getItemsForFolder(int $folderId, string $originalLocation, int $slashLimit = 1)
+	{
+		$query = $this->connection->getQueryBuilder();
+		$query->select(['*'])
+			->from('group_folders_trash')
+			->where($query->expr()->eq('folder_id', $query->createNamedParameter($folderId, IQueryBuilder::PARAM_INT)))
+			->andWhere($query->expr()->like('original_location', $query->createNamedParameter($originalLocation . '%')))
+			->andWhere($query->expr()->notLike('original_location', $query->createNamedParameter(str_repeat('%/', $slashLimit) . '%')));
+
+		return $query->executeQuery()->fetchAll();
+	}
+
+	public function getNeededFolders(int $folderId, string $originalLocation, int $slashLimit = 1)
+	{
+		$query = $this->connection->getQueryBuilder();
+		$query->selectDistinct(['original_location'])
+			->from('group_folders_trash')
+			->where($query->expr()->eq('folder_id', $query->createNamedParameter($folderId, IQueryBuilder::PARAM_INT)))
+			// ->andWhere($query->expr()->like('original_location', $query->createNamedParameter($originalLocation . '%')))
+			->andWhere($query->expr()->like('original_location', $query->createNamedParameter(str_repeat('%/', $slashLimit) . '%')))
+			->andWhere($query->expr()->notLike('original_location', $query->createNamedParameter(str_repeat('%/', $slashLimit + 1) . '%')));
+
+		return array_map(function($location) use ($originalLocation) {
+			$location = str_replace($originalLocation, '', $location['original_location']);
+			if(strpos($location, '/') !== false) {
+				$location = substr($location, 0, strrpos($location, '/'));
+			}
+
+			return trim($location, '/');
+		}, $query->executeQuery()->fetchAll());
+	}
+
 	public function addTrashItem(int $folderId, string $name, int $deletedTime, string $originalLocation, int $fileId): void {
 		$query = $this->connection->getQueryBuilder();
 		$query->insert('group_folders_trash')
