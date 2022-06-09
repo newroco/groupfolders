@@ -243,7 +243,7 @@ class FolderManager {
 			'size' => $row['size'] ? $row['size'] : 0,
 			'acl' => (bool)$row['acl'],
 			'manage' => $this->getManageAcl($folderMappings)
-		] : false;
+		] : [];
 	}
 
 	/**
