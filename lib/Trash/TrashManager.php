@@ -72,18 +72,17 @@ class TrashManager {
 		$query->selectDistinct(['original_location'])
 			->from('group_folders_trash')
 			->where($query->expr()->eq('folder_id', $query->createNamedParameter($folderId, IQueryBuilder::PARAM_INT)))
-			// ->andWhere($query->expr()->like('original_location', $query->createNamedParameter($originalLocation . '%')))
+			->andWhere($query->expr()->like('original_location', $query->createNamedParameter($originalLocation . '%')))
 			->andWhere($query->expr()->like('original_location', $query->createNamedParameter(str_repeat('%/', $slashLimit) . '%')))
 			->andWhere($query->expr()->notLike('original_location', $query->createNamedParameter(str_repeat('%/', $slashLimit + 1) . '%')));
 
-		return array_map(function($location) use ($originalLocation) {
-			$location = str_replace($originalLocation, '', $location['original_location']);
-			if(strpos($location, '/') !== false) {
-				$location = substr($location, 0, strrpos($location, '/'));
-			}
+		$folders = array_map(function($location) {
+			$locationArr = explode('/', $location['original_location']);
 
-			return trim($location, '/');
+			return $locationArr[array_key_last($locationArr) - 1];
 		}, $query->executeQuery()->fetchAll());
+
+		return array_unique($folders);
 	}
 
 	public function addTrashItem(int $folderId, string $name, int $deletedTime, string $originalLocation, int $fileId): void {
