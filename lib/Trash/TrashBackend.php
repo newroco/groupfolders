@@ -120,10 +120,6 @@ class TrashBackend implements ITrashBackend {
 	 * @return list<ITrashItem>
 	 */
 	public function listTrashFolder(ITrashItem $trashItem): array {
-		if (! $trashItem instanceof FakeGroupTrashDir) {
-			return [];
-		}
-
 		$user = $trashItem->getUser();
 		$view = new View('/__groupfolders/trash/');
 		$folders = $items = [];
@@ -193,7 +189,7 @@ class TrashBackend implements ITrashBackend {
 			throw new \LogicException('Trying to restore normal trash item in group folder trash backend');
 		}
 		$user = $item->getUser();
-		[, $folderId] = explode('/', $item->getTrashPath());
+		[$folderId,] = explode('/', $item->getTrashPath());
 		$node = $this->getNodeForTrashItem($user, $item);
 		if ($node === null) {
 			throw new NotFoundException();
@@ -260,7 +256,7 @@ class TrashBackend implements ITrashBackend {
 			throw new \LogicException('Trying to remove normal trash item in group folder trash backend');
 		}
 		$user = $item->getUser();
-		[, $folderId] = explode('/', $item->getTrashPath());
+		[$folderId,] = explode('/', $item->getTrashPath());
 		$node = $this->getNodeForTrashItem($user, $item);
 		if ($node === null) {
 			throw new NotFoundException();
@@ -273,9 +269,7 @@ class TrashBackend implements ITrashBackend {
 		}
 
 		$node->getStorage()->getCache()->remove($node->getInternalPath());
-		if ($item->isRootItem()) {
-			$this->trashManager->removeItem((int)$folderId, $item->getName(), $item->getDeletedTime());
-		}
+		$this->trashManager->removeItem((int)$folderId, $item->getName(), $item->getDeletedTime());
 	}
 
 	public function moveToTrash(IStorage $storage, string $internalPath): bool {
@@ -331,7 +325,8 @@ class TrashBackend implements ITrashBackend {
 	}
 
 	private function getNodeForTrashItem(IUser $user, ITrashItem $trashItem): ?Node {
-		[, $folderId, $path] = explode('/', $trashItem->getTrashPath(), 3);
+		[$folderId, $path] = explode('/', $trashItem->getTrashPath(), 2);
+		$path .= '.d' . $trashItem->getDeletedTime();
 		$folders = $this->folderManager->getFoldersForUser($user);
 		foreach ($folders as $groupFolder) {
 			if ($groupFolder['folder_id'] === (int)$folderId) {
