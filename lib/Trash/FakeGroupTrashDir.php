@@ -35,4 +35,9 @@ class FakeGroupTrashDir extends GroupTrashItem {
 	{
 		return $this->folderId;
 	}
+
+	public function isFakeDir()
+	{
+		return true;
+	}
 }
