@@ -54,6 +54,25 @@ class TrashManager {
 		}, $query->executeQuery()->fetchAll());
 	}
 
+	public function getTimestampForFolder($folderId, $location = null): string
+	{
+		$query = $this->connection->getQueryBuilder();
+		$query->select(['deleted_time'])
+			->from('group_folders_trash')
+			->where($query->expr()->eq('folder_id', $query->createNamedParameter($folderId, IQueryBuilder::PARAM_INT)));
+
+		if(isset($location) && $location !== '') {
+			$slashLimit = substr_count($location, '/');
+			$query->andWhere($query->expr()->like('original_location', $query->createNamedParameter($location . '%')))
+				->andWhere($query->expr()->notLike('original_location', $query->createNamedParameter(str_repeat('%/', $slashLimit))));
+		}
+
+		$query->orderBy('deleted_time', 'DESC')
+			->setMaxResults(1);
+
+		return $query->executeQuery()->fetch()['deleted_time'];
+	}
+
 	public function getItemsForFolder(int $folderId, string $originalLocation, int $slashLimit = 1)
 	{
 		$query = $this->connection->getQueryBuilder();

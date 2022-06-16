@@ -94,7 +94,7 @@ class TrashBackend implements ITrashBackend {
 			$items[] = new FakeGroupTrashDir(
 				$this,
 				$folder['mount_point'],
-				'1',
+				$this->trashManager->getTimestampForFolder($id),
 				'/' . $folder['folder_id'],
 				$this->getTrashFolder($id),
 				$user,
@@ -144,11 +144,11 @@ class TrashBackend implements ITrashBackend {
 			$entries = $this->trashManager->getItemsForFolder($folderId, $location, $slashLimit);
 			$fakeFoldersNeeded = $this->trashManager->getNeededFolders($folderId, $location, $slashLimit);
 			if(count($fakeFoldersNeeded) > 0) {
-				$folders = array_map(function($folder) use ($folderId, $rootFolder, $user) {
+				$folders = array_map(function($folder) use ($folderId, $rootFolder, $user, $location) {
 					return new FakeGroupTrashDir(
 						$this,
 						'',
-						'1',
+						$this->trashManager->getTimestampForFolder($folderId, $location == '' ? $folder : $location),
 						'',
 						$rootFolder,
 						$user,
@@ -176,7 +176,13 @@ class TrashBackend implements ITrashBackend {
 				);
 			}, $entries);
 
-			return array_merge($items, $folders);
+			$items = array_merge($items, $folders);
+
+			usort($items, function (ITrashItem $a, ITrashItem $b) {
+					return $b->getDeletedTime() - $a->getDeletedTime();
+			});
+
+			return $items;
 		}
 	}
 
