@@ -37,7 +37,7 @@ class GroupTrashItem extends TrashItem {
 		FileInfo $fileInfo,
 		IUser $user,
 		string $mountPoint
-	) {
+		) {
 		parent::__construct($backend, $originalLocation, $deletedTime, $trashPath, $fileInfo, $user);
 		$this->mountPoint = $mountPoint;
 	}
@@ -52,5 +52,10 @@ class GroupTrashItem extends TrashItem {
 
 	public function getTitle(): string {
 		return $this->getGroupFolderMountPoint() . '/' . $this->getOriginalLocation();
+	}
+
+	public function isFakeDir()
+	{
+		return false;
 	}
 }
