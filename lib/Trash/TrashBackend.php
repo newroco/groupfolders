@@ -116,74 +116,100 @@ class TrashBackend implements ITrashBackend {
 		return trim($this->location, '/');
 	}
 
+	private function getFakeFolderItemsFromDB($trashItem, $user)
+	{
+		$view = new View('/__groupfolders/trash/');
+		$folders = $items = [];
+		$slashLimit = 0;
+		$folderId = $trashItem->getFolderId();
+		$rootFolder = $this->getTrashFolder($folderId);
+		$folderName = $trashItem->getName();			
+		if($this->folderManager->getFolder($folderId, 0)['mount_point'] !== $folderName) {
+			$this->setLocation($folderName);
+		}
+		$location = $this->getLocation();
+
+		if($location === '') {
+			$slashLimit = 1;
+		} else if (substr_count($location, '/') > 0) {
+			$slashLimit = substr_count($location, '/') + 2;
+		} else {
+			$slashLimit = 2;
+		}
+
+		$entries = $this->trashManager->getItemsForFolder($folderId, $location, $slashLimit);
+		$fakeFoldersNeeded = $this->trashManager->getNeededFolders($folderId, $location, $slashLimit);
+		if(count($fakeFoldersNeeded) > 0) {
+			$folders = array_map(function($folder) use ($folderId, $rootFolder, $user, $location) {
+				return new FakeGroupTrashDir(
+					$this,
+					'',
+					$this->trashManager->getTimestampForFolder($folderId, $location == '' ? $folder : $location),
+					'',
+					$rootFolder,
+					$user,
+					$folder,
+					$folderId
+				);
+			}, $fakeFoldersNeeded);
+		}
+
+		$items = array_map(function($entry) use ($folderId, $view, $user, $folderName) {
+			$name = $entry['name'];
+			$deletedAt = $entry['deleted_time'];
+			$originalLocation = $entry['original_location'];
+			$fileInfo = $view->getFileInfo($folderId . '/' . $name . '.d' . $deletedAt);
+			$fileInfo['name'] = $name;
+
+			return new GroupTrashItem(
+				$this,
+				$originalLocation,
+				$deletedAt,
+				$entry['folder_id'] . '/' . $name,
+				$fileInfo,
+				$user,
+				$folderName
+			);
+		}, $entries);
+
+		$items = array_merge($items, $folders);
+
+		usort($items, function (ITrashItem $a, ITrashItem $b) {
+				return $b->getDeletedTime() - $a->getDeletedTime();
+		});
+
+		return $items;
+	}
+
 	/**
 	 * @return list<ITrashItem>
 	 */
 	public function listTrashFolder(ITrashItem $trashItem): array {
 		$user = $trashItem->getUser();
-		$view = new View('/__groupfolders/trash/');
-		$folders = $items = [];
-		$slashLimit = 0;
+
 		if($trashItem instanceof FakeGroupTrashDir) {
-			$folderId = $trashItem->getFolderId();
-			$rootFolder = $this->getTrashFolder($folderId);
-			$folderName = $trashItem->getName();			
-			if($this->folderManager->getFolder($folderId, 0)['mount_point'] !== $folderName) {
-				$this->setLocation($folderName);
-			}
-			$location = $this->getLocation();
-
-			if($location === '') {
-				$slashLimit = 1;
-			} else if (substr_count($location, '/') > 0) {
-				$slashLimit = substr_count($location, '/') + 2;
-			} else {
-				$slashLimit = 2;
-			}
-
-			$entries = $this->trashManager->getItemsForFolder($folderId, $location, $slashLimit);
-			$fakeFoldersNeeded = $this->trashManager->getNeededFolders($folderId, $location, $slashLimit);
-			if(count($fakeFoldersNeeded) > 0) {
-				$folders = array_map(function($folder) use ($folderId, $rootFolder, $user, $location) {
-					return new FakeGroupTrashDir(
-						$this,
-						'',
-						$this->trashManager->getTimestampForFolder($folderId, $location == '' ? $folder : $location),
-						'',
-						$rootFolder,
-						$user,
-						$folder,
-						$folderId
-					);
-				}, $fakeFoldersNeeded);
-			}
-
-			$items = array_map(function($entry) use ($folderId, $view, $user, $folderName) {
-				$name = $entry['name'];
-				$deletedAt = $entry['deleted_time'];
-				$originalLocation = $entry['original_location'];
-				$fileInfo = $view->getFileInfo($folderId . '/' . $name . '.d' . $deletedAt);
-				$fileInfo['name'] = $name;
-
-				return new GroupTrashItem(
-					$this,
-					$originalLocation,
-					$deletedAt,
-					$entry['folder_id'] . '/' . $name,
-					$fileInfo,
-					$user,
-					$folderName
-				);
-			}, $entries);
-
-			$items = array_merge($items, $folders);
-
-			usort($items, function (ITrashItem $a, ITrashItem $b) {
-					return $b->getDeletedTime() - $a->getDeletedTime();
-			});
-
-			return $items;
+			return $this->getFakeFolderItemsFromDB($trashItem, $user);
+		} else if (!$trashItem instanceof GroupTrashItem) {
+			return [];
 		}
+		// a subfolderfolder was deleted from the groupfolder,
+		// display it's content using DAV
+		$folder = $this->getNodeForTrashItem($user, $trashItem);
+		if (!$folder instanceof Folder) {
+			return [];
+		}
+		$content = $folder->getDirectoryListing();
+		return  array_map(function (Node $node) use ($trashItem, $user) {
+			return new GroupTrashItem(
+				$this,
+				$trashItem->getOriginalLocation() . '/' . $node->getName(),
+				$trashItem->getDeletedTime(),
+				$trashItem->getTrashPath() . '/' . $node->getName(),
+				$node,
+				$user,
+				$trashItem->getGroupFolderMountPoint()
+			);
+		}, $content);
 	}
 
 	/**
