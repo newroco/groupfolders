@@ -73,14 +73,17 @@ class TrashManager {
 		return $query->executeQuery()->fetch()['deleted_time'];
 	}
 
-	public function getItemsForFolder(int $folderId, string $originalLocation, int $slashLimit = 1)
+	public function getItemsForFolder(int $folderId, string $originalLocation, int $slashLimit = 1, array $wantedFields = null)
 	{
 		$query = $this->connection->getQueryBuilder();
-		$query->select(['*'])
+		$query->select($wantedFields ?? ['*'])
 			->from('group_folders_trash')
 			->where($query->expr()->eq('folder_id', $query->createNamedParameter($folderId, IQueryBuilder::PARAM_INT)))
-			->andWhere($query->expr()->like('original_location', $query->createNamedParameter($originalLocation . '%')))
-			->andWhere($query->expr()->notLike('original_location', $query->createNamedParameter(str_repeat('%/', $slashLimit) . '%')));
+			->andWhere($query->expr()->like('original_location', $query->createNamedParameter($originalLocation . '%')));
+		
+		if($slashLimit !== 0) {
+			$query->andWhere($query->expr()->notLike('original_location', $query->createNamedParameter(str_repeat('%/', $slashLimit) . '%')));
+		}
 
 		return $query->executeQuery()->fetchAll();
 	}
