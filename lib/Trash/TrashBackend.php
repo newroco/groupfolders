@@ -212,7 +212,7 @@ class TrashBackend implements ITrashBackend {
 		}, $content);
 	}
 
-	private function checkRestorePermissions($node, $user, $folderId, $originalLocation)
+	private function checkRestorePermissions(Node $node, IUser $user, int $folderId, string $originalLocation)
 	{
 		if ($node === null) {
 			throw new NotFoundException();
@@ -244,46 +244,7 @@ class TrashBackend implements ITrashBackend {
 			$originalLocation = $item['original_location'];
 			$this->checkRestorePermissions($node, $user, $folderId, $item['original_location']);
 
-			$trashStorage = $node->getStorage();
-			/** @var Folder $targetFolder */
-			$targetFolder = $this->mountProvider->getFolder((int)$folderId);
-			$parent = dirname($originalLocation);
-			if ($parent === '.') {
-				$parent = '';
-			}
-			if ($parent !== '' && !$targetFolder->nodeExists($parent)) {
-				$originalLocation = basename($originalLocation);
-			}
-
-			if ($targetFolder->nodeExists($originalLocation)) {
-				$info = pathinfo($originalLocation);
-				$i = 1;
-
-				$gen = function ($info, int $i): string {
-					$target = $info['dirname'];
-					if ($target === '.') {
-						$target = '';
-					}
-
-					$target .= $info['filename'];
-					$target .= ' (' . $i . ')';
-
-					if (isset($info['extension'])) {
-						$target .= $info['extension'];
-					}
-
-					return $target;
-				};
-
-				do {
-					$originalLocation = $gen($info, $i);
-					$i++;
-				} while ($targetFolder->nodeExists($originalLocation));
-			}
-
-			$targetLocation = $targetFolder->getInternalPath() . '/' . $originalLocation;
-			$targetFolder->getStorage()->moveFromStorage($trashStorage, $node->getInternalPath(), $targetLocation);
-			$targetFolder->getStorage()->getUpdater()->renameFromStorage($trashStorage, $node->getInternalPath(), $targetLocation);
+			$this->restore($node, $folderId, $item, $originalLocation);
 			$this->trashManager->removeItem((int)$folderId, $item['name'], $item['deleted_time']);
 		}
 	}
@@ -303,21 +264,18 @@ class TrashBackend implements ITrashBackend {
 		}
 		[$folderId,] = explode('/', $item->getTrashPath());
 		$node = $this->getNodeForTrashItem($user, $item);
-		if ($node === null) {
-			throw new NotFoundException();
-		}
-		if (!$this->userHasAccessToPath($item->getUser(), $folderId . '/' . $item->getOriginalLocation(), Constants::PERMISSION_UPDATE)) {
-			throw new NotPermittedException();
-		}
-		$folderPermissions = $this->folderManager->getFolderPermissionsForUser($item->getUser(), (int)$folderId);
-		if (($folderPermissions & Constants::PERMISSION_UPDATE) !== Constants::PERMISSION_UPDATE) {
-			throw new NotPermittedException();
-		}
+		$this->checkRestorePermissions($node, $user, $folderId, $item->getOriginalLocation());
 
+		$this->restore($node, $folderId, $item);
+		$this->trashManager->removeItem((int)$folderId, $item->getName(), $item->getDeletedTime());
+	}
+
+	private function restore($node, $folderId, $item, $originalLocation = null)
+	{
 		$trashStorage = $node->getStorage();
 		/** @var Folder $targetFolder */
 		$targetFolder = $this->mountProvider->getFolder((int)$folderId);
-		$originalLocation = $item->getOriginalLocation();
+		$originalLocation = $originalLocation ?? $item->getOriginalLocation();
 		$parent = dirname($originalLocation);
 		if ($parent === '.') {
 			$parent = '';
@@ -355,7 +313,6 @@ class TrashBackend implements ITrashBackend {
 		$targetLocation = $targetFolder->getInternalPath() . '/' . $originalLocation;
 		$targetFolder->getStorage()->moveFromStorage($trashStorage, $node->getInternalPath(), $targetLocation);
 		$targetFolder->getStorage()->getUpdater()->renameFromStorage($trashStorage, $node->getInternalPath(), $targetLocation);
-		$this->trashManager->removeItem((int)$folderId, $item->getName(), $item->getDeletedTime());
 	}
 
 	private function removeAllItemsFromFakeFolder(FakeGroupTrashDir $folder): void
