@@ -252,7 +252,7 @@ class FolderManager {
 	 * @return bool
 	 * @throws Exception
 	 */
-	public function getFolderAclEnabled(int $id): bool {
+	public function getFolderAclEnabled(int $id): bool { 
 		$query = $this->connection->getQueryBuilder();
 		$query->select('acl')
 			->from('group_folders', 'f')
