@@ -83,19 +83,26 @@ class TrashBackend implements ITrashBackend {
 	 * @return list<ITrashItem>
 	 */
 	public function listTrashRoot(IUser $user): array {
-		$folderIds = $this->trashManager->groupTrashFolderIds();
+		$folders = $this->trashManager->groupTrashFolderIds();
 		$items = [];
 
-		foreach($folderIds as $id) {
+		foreach($folders as $folder) {
+			$id = $folder['folder_id'];
+
 			$folder = $this->folderManager->getFolder($id, 0);
 			if(empty($folder)) {
 				continue;
 			}
+
+			if (!$this->userHasAccessToFolder($user, (int)$folder['id']) || !$this->userHasAccessToPath($user, $folder['mount_point'])) {
+				continue;
+			}
+
 			$items[] = new FakeGroupTrashDir(
 				$this,
 				$folder['mount_point'],
 				$this->trashManager->getTimestampForFolder($id),
-				'/' . $folder['folder_id'],
+				'/' . $folder['id'],
 				$this->getTrashFolder($id),
 				$user,
 				$folder['mount_point'],
@@ -123,10 +130,12 @@ class TrashBackend implements ITrashBackend {
 		$slashLimit = 0;
 		$folderId = $trashItem->getFolderId();
 		$rootFolder = $this->getTrashFolder($folderId);
-		$folderName = $trashItem->getName();			
-		if($this->folderManager->getFolder($folderId, 0)['mount_point'] !== $folderName) {
-			$this->setLocation($folderName);
-		}
+		$folderName = $trashItem->getName();
+		// if($this->folderManager->getFolder($folderId, 0)['mount_point'] !== $folderName) {
+		// 	$this->setLocation($folderName);
+		// }
+
+		$this->setLocation($folderName);
 		$location = $this->getLocation();
 
 		if($location === '') {
@@ -137,19 +146,38 @@ class TrashBackend implements ITrashBackend {
 			$slashLimit = 2;
 		}
 
-		$entries = $this->trashManager->getItemsForFolder($folderId, $location, $slashLimit);
-		$fakeFoldersNeeded = $this->trashManager->getNeededFolders($folderId, $location, $slashLimit);
+		$relativeLocation = substr(
+			$location,
+			strlen(
+				str_replace(
+					'\\',
+					'/',
+					$this->folderManager->getFolder($folderId, 0)['mount_point']
+				) . '/'
+			)
+		);
+
+		$entries = $this->trashManager->getItemsForFolder($folderId, $relativeLocation, $slashLimit);
+		// $entries = array_filter($entries, function($entry) use ($user) {
+		// 	return $this->userHasAccessToPath($user, $entry['original_location']);
+		// });
+
+		$fakeFoldersNeeded = $this->trashManager->getNeededFolders($folderId, $location, $relativeLocation);
+		// $fakeFoldersNeeded = array_filter($fakeFoldersNeeded, function($folder) use ($user, $location) {
+		// 	return $this->userHasAccessToFolder($user, (int)$folder['folder_id']) && $this->userHasAccessToPath($user, $location . '/' . $folder['mount_point']);
+		// });
+
 		if(count($fakeFoldersNeeded) > 0) {
-			$folders = array_map(function($folder) use ($folderId, $rootFolder, $user, $location) {
+			$folders = array_map(function($folder) use ($trashItem, $rootFolder, $user, $location) {
 				return new FakeGroupTrashDir(
 					$this,
-					'',
-					$this->trashManager->getTimestampForFolder($folderId, $location == '' ? $folder : $location),
-					$location,
+					$trashItem->getOriginalLocation() . '/' . $folder['mount_point'],
+					$this->trashManager->getTimestampForFolder($folder['folder_id'], $location == '' ? $folder['mount_point'] : $location),
+					$folder['folder_id'],
 					$rootFolder,
 					$user,
-					$folder,
-					$folderId
+					$folder['mount_point'],
+					$folder['folder_id']
 				);
 			}, $fakeFoldersNeeded);
 		}
@@ -315,7 +343,7 @@ class TrashBackend implements ITrashBackend {
 		$targetFolder->getStorage()->getUpdater()->renameFromStorage($trashStorage, $node->getInternalPath(), $targetLocation);
 	}
 
-	private function removeAllItemsFromFakeFolder(FakeGroupTrashDir $folder): void 
+	private function removeAllItemsFromFakeFolder(FakeGroupTrashDir $folder): void
 	{
 		if($folder->getTrashPath() === '/') {
 			$location = '';
@@ -385,6 +413,26 @@ class TrashBackend implements ITrashBackend {
 			$trashName = $name . '.d' . $time;
 			[$unJailedStorage, $unJailedInternalPath] = $this->unwrapJails($storage, $internalPath);
 			$targetInternalPath = $trashFolder->getInternalPath() . '/' . $trashName;
+			# First, check if the correct folder structure exists
+			// $trashStorage->is_dir($trashFolder->getInternalPath())
+			$trashFoldersArray = explode('/', $trashFolder->getInternalPath());
+			$folderToCheck = array_shift($trashFoldersArray);
+			do {
+				# Check if the folder exists
+				if (!$trashStorage->is_dir($folderToCheck)) {
+					# If not, create it
+					$trashStorage->mkdir($folderToCheck);
+				}
+
+				# Check if we already reached the end of the array, so we don't go into an infinite loop
+				if (count($trashFoldersArray) === 0) {
+					break;
+				}
+
+				# Go one level deeper in the folder path, repeat
+				$folderToCheck = $folderToCheck . '/' . array_shift($trashFoldersArray);
+			} while (count($trashFoldersArray) >= 0);
+
 			if ($trashStorage->moveFromStorage($unJailedStorage, $unJailedInternalPath, $targetInternalPath)) {
 				$this->trashManager->addTrashItem($folderId, $name, $time, $internalPath, $fileEntry->getId());
 				if ($trashStorage->getCache()->getId($targetInternalPath) !== $fileEntry->getId()) {

@@ -45,64 +45,249 @@ class TrashManager {
 	}
 
 	public function groupTrashFolderIds(): array {
+		## Prepare the query builders
+		# Main query builder
 		$query = $this->connection->getQueryBuilder();
-		$query->selectDistinct(['folder_id'])
-			->from('group_folders_trash');
+		# Nested query builder
+		$subQuery = $this->connection->getQueryBuilder();
 
-		return array_map(function($folder) {
-			return (int) $folder['folder_id'];
-		}, $query->executeQuery()->fetchAll());
+		# Build the nested query: Get distinct folder_ids from the trash folders
+		$distinctTrashFolderIds = $subQuery->selectDistinct([
+			'ogft.folder_id'
+		])->from(
+			'group_folders_trash',
+			'ogft'
+		)->getSQL();
+
+		# Create the main query
+		$folders = $query->selectDistinct([
+			'ogf.folder_id',
+			'ogf.mount_point'
+		])->from(
+			'group_folders',
+			'ogf'
+		)->join(
+			'ogf',
+			'group_folders',
+			'ogf_clone',
+			$query->createFunction(
+				"regexp_replace(ogf.mount_point::text, '\\\\', '/', 'g') = split_part(
+					regexp_replace(ogf_clone.mount_point::text, '\\\\', '/', 'g'),
+					'/',
+					1
+				)"
+			)
+		)->where(
+			$query->expr()->in(
+				'ogf_clone.folder_id',
+				$query->createFunction(
+					'(' .$distinctTrashFolderIds .')'
+				)
+			)
+		);
+
+		# Execute and return the result
+		return $folders->executeQuery()->fetchAll();
+
+		// return array_map(
+		// 	function($folder) {
+		// 		return [
+		// 			'folder_id' 	=> (int) $folder['folder_id'],
+		// 			'root_folder'	=> $folder['root_folder']
+		// 		];
+		// 	},
+		// 	$result
+		// );
 	}
 
 	public function getTimestampForFolder($folderId, $location = null): string
 	{
+		# Main query builder
 		$query = $this->connection->getQueryBuilder();
-		$query->select(['deleted_time'])
-			->from('group_folders_trash')
-			->where($query->expr()->eq('folder_id', $query->createNamedParameter($folderId, IQueryBuilder::PARAM_INT)));
+		# Nested query builder
+		$subQuery = $this->connection->getQueryBuilder();
 
-		if(isset($location) && $location !== '') {
-			$slashLimit = substr_count($location, '/');
-			$query->andWhere($query->expr()->like('original_location', $query->createNamedParameter($location . '%')))
-				->andWhere($query->expr()->notLike('original_location', $query->createNamedParameter(str_repeat('%/', $slashLimit))));
-		}
 
-		$query->orderBy('deleted_time', 'DESC')
-			->setMaxResults(1);
+		# Build the nested query: Get mount point or folder with specific id
+		$folderMountPoint = $subQuery->select([
+			'mount_point'
+		])->from('group_folders')->where(
+			$query->expr()->eq(
+				'folder_id',
+				$query->createNamedParameter($folderId, IQueryBuilder::PARAM_INT)
+			)
+		)->getSQL();
 
-		return $query->executeQuery()->fetch()['deleted_time'];
+		$query->select([
+			'ogft.deleted_time'
+		])->from('group_folders_trash', 'ogft')->join(
+			'ogft',
+			'group_folders',
+			'ogf',
+			'ogft.folder_id = ogf.folder_id'
+		)->where(
+			$query->createFunction(
+				"split_part(
+					regexp_replace(ogf.mount_point::text, '\\\\', '/', 'g'),
+					'/',
+					1
+				) = (" . $folderMountPoint . ")"
+			)
+		)->orWhere(
+			"ogf.mount_point = (" . $folderMountPoint . ")"
+		);
+
+		// if(isset($location) && $location !== '') {
+		// 	$slashLimit = substr_count($location, '/');
+		// 	$query->andWhere($query->expr()->like('original_location', $query->createNamedParameter($location . '%')))
+		// 		->andWhere($query->expr()->notLike('original_location', $query->createNamedParameter(str_repeat('%/', $slashLimit))));
+		// }
+
+		// $query->orderBy('deleted_time', 'DESC')
+		// 	->setMaxResults(1);
+
+		// $sql = $query->getSQL();
+
+		return $query->executeQuery()->fetch()['deleted_time'] ?? '-1';
 	}
 
-	public function getItemsForFolder(int $folderId, string $originalLocation, int $slashLimit = 1, array $wantedFields = null)
+	public function getItemsForFolder(int $folderId, string $relativeLocation, int $slashLimit = 1, array $wantedFields = null)
 	{
 		$query = $this->connection->getQueryBuilder();
-		$query->select($wantedFields ?? ['*'])
-			->from('group_folders_trash')
-			->where($query->expr()->eq('folder_id', $query->createNamedParameter($folderId, IQueryBuilder::PARAM_INT)))
-			->andWhere($query->expr()->like('original_location', $query->createNamedParameter($originalLocation . '%')));
-		
-		if($slashLimit !== 0) {
-			$query->andWhere($query->expr()->notLike('original_location', $query->createNamedParameter(str_repeat('%/', $slashLimit) . '%')));
-		}
+
+		# Query the trash table for all items whose name is related to their original location, and have no child items (it means they are NOT folders),
+		$folderIdParam = $query->createNamedParameter($folderId, IQueryBuilder::PARAM_INT);
+		$fileLocationString = ($relativeLocation === '') ?
+			"ogft.name" :
+			"CONCAT(" . $query->createNamedParameter($relativeLocation, IQueryBuilder::PARAM_STR) . "::text, '/', ogft.name)";
+
+		$startsWithCondition = $query->createFunction('starts_with(ogft2.original_location, ogft.original_location)');
+
+		$query->select($wantedFields ?? ['ogft.*'])
+			->from('group_folders_trash', 'ogft')
+			->join('ogft', 'group_folders_trash', 'ogft2', $startsWithCondition)
+			->where($query->expr()->eq('ogft.folder_id', $folderIdParam))
+			->andWhere(
+				$query->expr()->like(
+					'ogft.original_location',
+					$query->createFunction($fileLocationString)
+				))
+			->groupBy('ogft.trash_id')
+			->having($query->createFunction('COUNT(ogft2.*) <= 1'));
 
 		return $query->executeQuery()->fetchAll();
 	}
 
-	public function getNeededFolders(int $folderId, string $originalLocation, int $slashLimit = 1)
+	public function getNeededFolders(int $folderId, string $absolutePath, string $relativePath)
 	{
-		$query = $this->connection->getQueryBuilder();
-		$query->selectDistinct(['original_location'])
-			->from('group_folders_trash')
-			->where($query->expr()->eq('folder_id', $query->createNamedParameter($folderId, IQueryBuilder::PARAM_INT)))
-			->andWhere($query->expr()->like('original_location', $query->createNamedParameter($originalLocation . '%')))
-			->andWhere($query->expr()->like('original_location', $query->createNamedParameter(str_repeat('%/', $slashLimit) . '%')))
-			->andWhere($query->expr()->notLike('original_location', $query->createNamedParameter(str_repeat('%/', $slashLimit + 1) . '%')));
+		$folders 				= [];
+		$activeFolders 			= $this->connection->getQueryBuilder();
+		$trashFolders 			= $this->connection->getQueryBuilder();
 
-		$folders = array_map(function($location) {
-			$locationArr = explode('/', $location['original_location']);
+		# Get the number of the slice we need when exploding the mount point in SQL\
+		# To do this, we explode the string by '/' to count the number of folders in the mount point
+		# We need to get the last "folder" (or slice), so we count the number of items in the resulting array
+		$sliceNumber = count(explode('/', $absolutePath));
 
-			return $locationArr[array_key_last($locationArr) - 1];
-		}, $query->executeQuery()->fetchAll());
+
+		$originalFolderMountPoint = $activeFolders->createFunction(
+			"SELECT regexp_replace(mount_point::text, '\\\\', '/', 'g') FROM oc_group_folders WHERE folder_id = :folder_id"
+		);
+		$originalFolderMountPointNoReplace = $activeFolders->createFunction(
+			"SELECT mount_point FROM oc_group_folders WHERE folder_id = :folder_id"
+		);
+		$replace = $activeFolders->createFunction(
+			"REPLACE(regexp_replace(ogf.mount_point::text, '\\\\', '/', 'g'), CONCAT((" . $originalFolderMountPoint . "),'/'), '')"
+		);
+
+		$slashesNumber = $activeFolders->createFunction("
+			CHAR_LENGTH( " . $replace . ") -
+			CHAR_LENGTH(REPLACE(
+				" . $replace . ",
+				'/',
+				'')
+			) < 1
+		");
+
+		$activeFolders
+			->selectDistinct('ogf.folder_id')
+			->selectAlias(
+				$activeFolders->createFunction(
+					"reverse(split_part(
+						reverse(regexp_replace(ogf.mount_point::text, '\\\\', '/', 'g')),
+						'/',
+						1
+					))"
+				),
+				'mount_point'
+			)
+			->from('group_folders', 'ogf')
+			->join(
+				'ogf',
+				'group_folders_trash',
+				'ogft',
+				'ogf.folder_id = ogft.folder_id'
+			)
+			->where(
+				$activeFolders->createFunction(
+					"starts_with(
+						mount_point,
+						(" . $originalFolderMountPointNoReplace . ")
+					)"
+				)
+			)
+			->andWhere('ogf.folder_id != :folder_id')
+			->andWhere($slashesNumber )
+			->groupBy('ogf.folder_id')
+			->having(
+				$activeFolders->createFunction('count(ogft.*) > 0')
+			)
+			->setParameters([
+				'folder_id'	=> $folderId
+			]);
+
+		$activeFoldersArray = $activeFolders->executeQuery()->fetchAll();
+
+		$folders = \array_merge($folders, $activeFoldersArray);
+
+		$inputtedSliceNo = ($sliceNumber > 1) ? $sliceNumber - 1 : $sliceNumber;
+
+		$mountPointAlias = $trashFolders->createFunction(
+			"split_part(
+				regexp_replace(original_location::text, '\\\\', '/', 'g'),
+				'/',
+				:slice_number
+			)"
+		);
+
+		$originalLocationComparator = ($relativePath === '') ?
+			$trashFolders->createFunction("original_location LIKE '%/%'") :
+			$trashFolders->createFunction("original_location LIKE CONCAT(:absolute_path::text, '/%/%')");
+
+		$trashFolders->selectDistinct(
+			'folder_id'
+		)->selectAlias(
+			$mountPointAlias,
+			'mount_point'
+		)->from(
+			'group_folders_trash'
+		)->where(
+			'folder_id = :folder_id'
+		)->andWhere(
+			$originalLocationComparator
+		)->setParameters([
+			'folder_id' 	=> $folderId,
+			'slice_number'	=> $inputtedSliceNo,
+			'absolute_path' => $relativePath
+		]);
+
+		$query = $trashFolders->getSQL();
+
+		$trashFoldersArray = $trashFolders->executeQuery()->fetchAll();
+
+		$folders = array_merge($folders, $trashFoldersArray);
+
+		return $folders;
 
 		return array_unique($folders);
 	}
