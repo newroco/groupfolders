@@ -341,6 +341,7 @@ class TrashBackend implements ITrashBackend {
 		$targetLocation = $targetFolder->getInternalPath() . '/' . $originalLocation;
 		$targetFolder->getStorage()->moveFromStorage($trashStorage, $node->getInternalPath(), $targetLocation);
 		$targetFolder->getStorage()->getUpdater()->renameFromStorage($trashStorage, $node->getInternalPath(), $targetLocation);
+		$this->trashManager->removeItem((int)$folderId, $item->getName(), $item->getDeletedTime());
 	}
 
 	private function removeAllItemsFromFakeFolder(FakeGroupTrashDir $folder): void
